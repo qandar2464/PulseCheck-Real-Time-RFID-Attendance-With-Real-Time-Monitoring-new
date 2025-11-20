@@ -1,0 +1,18 @@
+{
+  "students": {
+    "BD926521": { "studentId": "UPTM-001", "name": "Hafiz", "program": "CS", "cohort": "2023" },
+    "ABCD1234": { "studentId": "UPTM-002", "name": "Ain",   "program": "IT", "cohort": "2023" },
+    "11223344": { "studentId": "UPTM-003", "name": "Faiz",  "program": "SE", "cohort": "2022" }
+  },
+  "sessions": {
+    "2025-TEST-SESSION-01": {
+      "subjectCode": "CSC3103",
+      "subjectName": "Computer Networks",
+      "hall": "A1",
+      "locked": false
+    }
+  },
+  "devices": {
+    "esp32_1": { "name": "Gate A — Hall 1", "hall": "A1", "assignedSession": "2025-TEST-SESSION-01" }
+  }
+}

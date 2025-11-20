@@ -1,0 +1,657 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <title>UPTM Exam Attendance — Admin</title>
+  <link rel="stylesheet" href="./styles.css"/>
+</head>
+<body>
+  <script>try{document.documentElement.classList.add('auth-check');}catch(e){}</script>
+  <!-- NAV BAR ADMIN (rekaan sahaja, tidak ubah fungsi JS) -->
+  <nav class="admin-nav">
+    <div class="brand">UPTM Admin</div>
+    <div class="links">
+      <a href="./index.html?view=session">Session</a>
+      <a href="./index.html?view=students">Students</a>
+      <a href="./index.html?view=assign">Assign</a>
+      <a href="./index.html?view=devices">Devices</a>
+      <a href="./index.html?view=live">Live</a>
+      <button id="themeToggle" class="btn" style="margin-left:8px">Dark Mode</button>
+    </div>
+  </nav>
+
+  <!-- Penapis paparan ikut parameter ?view=... (tidak sentuh fungsi sedia ada) -->
+  <script>
+    (function(){
+      try {
+        var v = new URLSearchParams(window.location.search).get('view');
+        if(v){ document.body.classList.add('view-'+v); }
+      } catch(e){}
+    })();
+  </script>
+  <script>
+    (function(){
+      var KEY='theme';
+      try {
+        var saved = localStorage.getItem(KEY)||'light';
+        if(saved==='dark'){ document.body.classList.add('theme-dark'); }
+      } catch(e){}
+      function setLabel(){
+        var btn=document.getElementById('themeToggle');
+        if(!btn) return;
+        btn.textContent = document.body.classList.contains('theme-dark') ? 'Light Mode' : 'Dark Mode';
+      }
+      document.addEventListener('DOMContentLoaded', function(){
+        setLabel();
+        var btn=document.getElementById('themeToggle');
+        if(btn){
+          btn.addEventListener('click', function(){
+            var dark = document.body.classList.toggle('theme-dark');
+            try { localStorage.setItem(KEY, dark?'dark':'light'); } catch(e){}
+            setLabel();
+          });
+        }
+      });
+    })();
+  </script>
+<script type="module">
+  // ===================== FIREBASE CONFIG =====================
+  const firebaseConfig = {
+    apiKey: "AIzaSyDcRcK3K6PGO8Q3HhkUCjzpG5TtI_VtqUk",
+    authDomain: "exam-attendance-uptm.firebaseapp.com",
+    databaseURL: "https://exam-attendance-uptm-default-rtdb.asia-southeast1.firebasedatabase.app",
+    projectId: "exam-attendance-uptm",
+    storageBucket: "exam-attendance-uptm.appspot.com",
+    messagingSenderId: "786015083116",
+    appId: "1:786015083116:web:99668a02662a156e7b5649",
+    measurementId: "G-B2NHR59NEG"
+  };
+
+  // ===================== SDK =====================
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js";
+  import {
+    getAuth, signInWithEmailAndPassword, signInWithPopup, signOut,
+    onAuthStateChanged, GoogleAuthProvider
+  } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-auth.js";
+  import {
+    getDatabase, ref, set, update, remove, get, onValue,
+    push, query, orderByChild, limitToLast, equalTo
+  } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-database.js";
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db   = getDatabase(app);
+
+  const $ = (s)=>document.querySelector(s);
+  const $$ = (s)=>[...document.querySelectorAll(s)];
+  const ts = (t)=> t? new Date((t)*1000).toLocaleString() : '';
+  const fmtISO = (t)=> t? new Date(t*1000).toISOString() : '';
+
+  // ===================== AUTH BAR =====================
+  const hdr = document.createElement('header');
+  hdr.innerHTML = `
+    <h2>UPTM Exam Attendance — Admin</h2>
+    <span id="authState" class="chip">Not signed in</span>
+    <input id="eml" placeholder="email"><input id="pwd" type="password" placeholder="password">
+    <button id="btnEmail" class="btn ok">Sign in</button>
+    <button id="btnGoogle" class="btn primary">Google</button>
+    <button id="btnOut" class="btn danger" style="display:none">Sign out</button>
+  `;
+  document.body.append(hdr);
+
+  $('#btnEmail').onclick = ()=>signInWithEmailAndPassword(auth,$('#eml').value,$('#pwd').value).catch(e=>alert(e.message));
+  $('#btnGoogle').onclick= ()=>signInWithPopup(auth,new GoogleAuthProvider()).catch(e=>alert(e.message));
+  $('#btnOut').onclick   = ()=>signOut(auth);
+
+  onAuthStateChanged(auth, u=>{
+    const signed = !!u;
+    if(!signed){
+      // Jika belum login, halakan ke halaman login
+      window.location.href = './login.html';
+      return;
+    }
+    // Sudah login: papar status dan teruskan boot
+    try{document.documentElement.classList.remove('auth-check');}catch(e){}
+    $('#authState').textContent = u.email||'Signed in';
+    $('#btnOut').style.display = 'inline-block';
+    ['btnEmail','btnGoogle','eml','pwd'].forEach(id=>{ const el=$('#'+id); if(el) el.style.display='none'; });
+    boot();
+  });
+  
+  // Operasi DB akan bermula selepas login (lihat fungsi boot sedia ada di bahagian util)
+
+  // ===================== SESSION MANAGER =====================
+  const TZ = 'Asia/Kuala_Lumpur';
+  const toEpoch = v => v ? Math.floor(new Date(v).getTime()/1000) : 0;
+  const epochToInput = e => e ? new Date(e*1000 - new Date().getTimezoneOffset()*60000).toISOString().slice(0,16) : '';
+  const dayName = (d)=>{
+    try { return new Intl.DateTimeFormat('en-GB',{weekday:'long', timeZone:TZ}).format(d); }
+    catch { return new Intl.DateTimeFormat('en-GB',{weekday:'long'}).format(d); }
+  };
+
+  const pSession=document.createElement('div'); pSession.className='panel';
+  pSession.innerHTML=`
+    <h3>SESSION MANAGER</h3>
+    <div class="row">
+      <input id="sessionId" placeholder="Session ID">
+      <input id="subjectCode" placeholder="Subject Code">
+      <input id="subjectName" placeholder="Subject Name">
+      <input id="hall" placeholder="Hall">
+    </div>
+    <div class="row">
+      <label class="small">Start</label><input id="startDate" type="datetime-local">
+      <label class="small" style="margin-left:12px">End</label><input id="endDate" type="datetime-local">
+      <label class="small" style="margin-left:12px">Day</label><input id="examDay" placeholder="e.g., Monday">
+    </div>
+    <div class="row">
+      <input id="graceMin" type="number" placeholder="Grace minutes (late)" value="10" style="width:180px">
+      <button id="saveSession" class="btn primary">Save Session</button>
+      <button id="delSession" class="btn danger">Delete</button>
+    </div>
+    <div class="row">
+      <select id="sessList" style="min-width:260px"></select>
+      <span class="small">Select and use in other panels</span>
+    </div>`;
+  document.body.append(pSession);
+
+  $('#startDate').addEventListener('change', ()=>{
+    const v=$('#startDate').value; $('#examDay').value = v ? dayName(new Date(v)) : '';
+  });
+
+  $('#saveSession').onclick=async()=>{
+    const sid=$('#sessionId').value.trim(); if(!sid) return;
+    const startISO=$('#startDate').value||'', endISO=$('#endDate').value||'';
+    const data={
+      subjectCode:$('#subjectCode').value, subjectName:$('#subjectName').value, hall:$('#hall').value,
+      startEpoch:toEpoch(startISO), endEpoch:toEpoch(endISO),
+      startISO, endISO, day: $('#examDay').value || (startISO?dayName(new Date(startISO)):''), graceMin:Number($('#graceMin').value||10),
+      locked:false, timeZone:TZ
+    };
+    await update(ref(db,'sessions/'+sid), data);
+    alert('Saved session '+sid);
+    await loadSessions(); selectDrop($('#sessList'), sid);
+    await Promise.all([fillAssignSess(), fillDevSess(), fillLiveSess()]);
+  };
+
+  $('#delSession').onclick=async()=>{
+    const sid=$('#sessionId').value.trim(); if(!sid) return;
+    if(!confirm('Delete session '+sid+' ?')) return;
+    await remove(ref(db,'sessions/'+sid)); alert('Deleted');
+    loadSessions(); fillAssignSess(); fillDevSess(); fillLiveSess();
+  };
+
+  async function loadSessions(){
+    const sel=$('#sessList'); sel.innerHTML='';
+    const v=(await get(ref(db,'sessions'))).val()||{};
+    Object.keys(v).sort().forEach(k=>{
+      const o=document.createElement('option'); o.value=k; o.textContent=k; sel.append(o);
+    });
+  }
+  $('#sessList').onchange=async()=>{
+    const sid=$('#sessList').value; if(!sid) return;
+    const v=(await get(ref(db,'sessions/'+sid))).val()||{};
+    $('#sessionId').value=sid; $('#subjectCode').value=v.subjectCode||''; $('#subjectName').value=v.subjectName||'';
+    $('#hall').value=v.hall||''; $('#graceMin').value=v.graceMin??10;
+    $('#startDate').value = v.startISO || epochToInput(v.startEpoch||0);
+    $('#endDate').value   = v.endISO   || epochToInput(v.endEpoch||0);
+    $('#examDay').value   = v.day || ($('#startDate').value? dayName(new Date($('#startDate').value)) : '');
+  };
+
+  // Initial dipindah ke dalam boot() selepas auth
+
+  // ===================== STUDENTS =====================
+  const pStudents=document.createElement('div'); pStudents.className='panel';
+  pStudents.innerHTML=`
+    <h3>STUDENT / STAFF MANAGEMENT</h3>
+    <div class="row">
+      <input id="uid" placeholder="UID (RFID)">
+      <input id="studentId" placeholder="Student/Staff ID">
+      <input id="name" placeholder="Name">
+      <input id="intake" placeholder="Intake (e.g., Jan 2025)">
+      <input id="course" placeholder="Course (e.g., BCS)">
+      <select id="typeSel"><option value="student">student</option><option value="staff">staff</option></select>
+      <button id="addStudent" class="btn ok">Save</button>
+      <button id="delStudent" class="btn danger">Delete</button>
+    </div>
+    <div class="row">
+      <button id="reloadStud" class="btn">Reload List</button>
+      <a href="./import.html" class="btn">Import from Excel</a>
+      <input id="studQuery" placeholder="Search name / ID / UID" style="flex:1"/>
+      <select id="studTypeFilter"><option value="">All</option><option value="student">student</option><option value="staff">staff</option></select>
+      <select id="studCourseFilter" style="min-width:140px"><option value="">All Course</option></select>
+      <button id="applyStudFilter" class="btn">Filter</button>
+      <button id="clearStudFilter" class="btn">Clear Filter</button>
+    </div>
+    <table><thead><tr><th>UID</th><th>ID</th><th>Name</th><th>Intake</th><th>Course</th><th>Type</th></tr></thead>
+      <tbody id="studBody"></tbody></table>`;
+  document.body.append(pStudents);
+
+  $('#addStudent').onclick = async ()=>{
+    const uid=$('#uid').value.trim(); if(!uid) return alert('UID required');
+    const data={studentId:$('#studentId').value.trim(), name:$('#name').value.trim(),
+                intake:$('#intake').value.trim(), course:$('#course').value.trim(),
+                type:$('#typeSel').value};
+    await set(ref(db,'students/'+uid), data); alert('Saved '+uid); loadStudentTable();
+  };
+  $('#delStudent').onclick = async ()=>{
+    const uid=$('#uid').value.trim(); if(!uid) return;
+    if(!confirm('Delete '+uid+' ?')) return;
+    await remove(ref(db,'students/'+uid)); alert('Deleted '+uid); loadStudentTable();
+  };
+  $('#reloadStud').onclick=loadStudentTable;
+
+  let lastStuds = {};
+  function renderStudentRows(v){
+    const q = ($('#studQuery')?.value||'').trim().toLowerCase();
+    const t = $('#studTypeFilter')?.value||'';
+    const c = $('#studCourseFilter')?.value||'';
+    const rows = Object.entries(v).map(([uid,o])=>({uid,...o}))
+      .filter(r=>{
+        const matchText = !q || [r.uid||'', r.studentId||'', r.name||''].some(s=>String(s).toLowerCase().includes(q));
+        const matchType = !t || (String(r.type||'student')===t);
+        const matchCourse = !c || (String(r.course||'').toLowerCase()===String(c).toLowerCase());
+        return matchText && matchType && matchCourse;
+      });
+    $('#studBody').innerHTML = rows.map(r=>`<tr data-uid="${r.uid}">
+      <td>${r.uid}</td><td>${r.studentId||''}</td><td>${r.name||''}</td>
+      <td>${r.intake||''}</td><td>${r.course||''}</td><td>${r.type||'student'}</td></tr>`).join('');
+    $$('#studBody tr').forEach(tr=>tr.onclick=()=>{
+      const uid=tr.dataset.uid, o=lastStuds[uid]||{};
+      $('#uid').value=uid; $('#studentId').value=o.studentId||''; $('#name').value=o.name||'';
+      $('#intake').value=o.intake||''; $('#course').value=o.course||''; $('#typeSel').value=o.type||'student';
+    });
+  }
+  async function loadStudentTable(){
+    lastStuds = (await get(ref(db,'students'))).val()||{};
+    // populate course filter options dari data semasa
+    const sel = document.getElementById('studCourseFilter');
+    if(sel){
+      const uniq = Array.from(new Set(Object.values(lastStuds).map(o=>String(o.course||'').trim()).filter(x=>x))).sort((a,b)=>a.localeCompare(b));
+      sel.innerHTML = '<option value="">All Course</option>' + uniq.map(x=>`<option value="${x}">${x}</option>`).join('');
+    }
+    renderStudentRows(lastStuds);
+  }
+  $('#applyStudFilter').onclick = ()=> renderStudentRows(lastStuds);
+  $('#clearStudFilter').onclick = ()=>{ if($('#studQuery')) $('#studQuery').value=''; if($('#studTypeFilter')) $('#studTypeFilter').value=''; if($('#studCourseFilter')) $('#studCourseFilter').value=''; renderStudentRows(lastStuds); };
+  $('#studQuery')?.addEventListener('input', ()=> renderStudentRows(lastStuds));
+  $('#studTypeFilter')?.addEventListener('change', ()=> renderStudentRows(lastStuds));
+  $('#studCourseFilter')?.addEventListener('change', ()=> renderStudentRows(lastStuds));
+  // Panggilan awal dipindah ke dalam boot() selepas auth
+
+  // ===================== ASSIGN =====================
+  const pAssign=document.createElement('div'); pAssign.className='panel';
+  pAssign.innerHTML=`
+    <h3>ASSIGN STUDENTS TO SESSION</h3>
+    <div class="row">
+      <select id="assignSess" style="min-width:240px"></select>
+      <button id="loadAssign" class="btn">Load</button>
+      <button id="saveAssign" class="btn primary">Save</button>
+      <button id="tickAllNow" class="btn ok">Tick All Now</button>
+      <button id="clearAll" class="btn">Clear</button>
+    </div>
+    <table><thead><tr><th></th><th>UID</th><th>Name</th><th>ID</th><th>Type</th></tr></thead>
+    <tbody id="assignBody"></tbody></table>`;
+  document.body.append(pAssign);
+
+  { const sel=$('#assignSess'); sel.innerHTML=''; const v=(await get(ref(db,'sessions'))).val()||{}; Object.keys(v).forEach(k=>{const o=document.createElement('option');o.value=k;o.textContent=k;sel.append(o);}); }
+  $('#loadAssign').onclick=async()=>{
+    const sid=$('#assignSess').value; if(!sid) return;
+    const studs=(await get(ref(db,'students'))).val()||{};
+    const asg=(await get(ref(db,'sessionStudents/'+sid))).val()||{};
+    $('#assignBody').innerHTML = Object.entries(studs).map(([uid,o])=>`
+      <tr>
+        <td><input type="checkbox" data-uid="${uid}" ${asg[uid]?'checked':''}></td>
+        <td>${uid}</td><td>${o.name||''}</td><td>${o.studentId||''}</td><td>${o.type||'student'}</td>
+      </tr>`).join('');
+  };
+  $('#clearAll').onclick  = ()=> $$('#assignBody input[type=checkbox]').forEach(b=>b.checked=false);
+  // Tick Semua: jika senarai belum di-load, load dahulu kemudian tanda semua
+  $('#tickAllNow').onclick = async ()=>{
+    const sid=$('#assignSess').value; if(!sid) return alert('Please select a session');
+    let boxes=[...document.querySelectorAll('#assignBody input[type=checkbox]')];
+    if(boxes.length===0 && typeof $('#loadAssign').onclick==='function'){
+      await $('#loadAssign').onclick();
+      boxes=[...document.querySelectorAll('#assignBody input[type=checkbox]')];
+    }
+    boxes.forEach(b=> b.checked=true);
+  };
+  $('#saveAssign').onclick=async()=>{
+    const sid=$('#assignSess').value; if(!sid) return;
+    const boxes=[...document.querySelectorAll('#assignBody input[type=checkbox]')];
+    const data={}; boxes.forEach(b=>{ if(b.checked) data[b.dataset.uid]=true; });
+    await set(ref(db,'sessionStudents/'+sid), data);
+    alert('Saved assignment for '+sid);
+  };
+
+  // ===================== DEVICES =====================
+  const pDev=document.createElement('div'); pDev.className='panel';
+  pDev.innerHTML=`
+    <h3>DEVICES</h3>
+    <div class="row">
+      <input id="devId" placeholder="Device ID (esp32_1)">
+      <select id="devSess" style="min-width:240px"></select>
+      <label><input type="checkbox" id="devEnabled" checked> enabled</label>
+      <button id="saveDev" class="btn primary">Assign</button>
+      <button id="delDev" class="btn danger">Delete</button>
+    </div>
+    <div class="row"><button id="reloadDev" class="btn">Reload</button></div>
+    <table>
+      <thead><tr><th>Device</th><th>Session</th><th>Enabled</th><th>Last Seen</th></tr></thead>
+      <tbody id="devBody"></tbody>
+    </table>`;
+  document.body.append(pDev);
+
+  { const sel=$('#devSess'); sel.innerHTML=''; const v=(await get(ref(db,'sessions'))).val()||{}; Object.keys(v).forEach(k=>{const o=document.createElement('option');o.value=k;o.textContent=k;sel.append(o);}); }
+  $('#saveDev').onclick=async()=>{
+    const id=$('#devId').value.trim(); if(!id) return;
+    await update(ref(db,'devices/'+id), {assignedSession:$('#devSess').value, enabled: $('#devEnabled').checked});
+    alert('Saved device'); loadDevices();
+  };
+  $('#delDev').onclick=async()=>{
+    const id=$('#devId').value.trim(); if(!id) return;
+    if(!confirm('Delete device '+id+' ?')) return;
+    await remove(ref(db,'devices/'+id)); alert('Deleted'); loadDevices();
+  };
+  $('#reloadDev').onclick=loadDevices;
+
+  {
+    const v=(await get(ref(db,'devices'))).val()||{};
+    const rows = Object.entries(v).map(([k,o])=>({id:k,...o}));
+    $('#devBody').innerHTML = rows.map(r=>`<tr data-id="${r.id}">
+      <td>${r.id}</td><td>${r.assignedSession||''}</td><td>${r.enabled?'yes':'no'}</td><td>${r.lastSeen? ts(r.lastSeen):''}</td></tr>`).join('');
+    $$('#devBody tr').forEach(tr=> tr.onclick=()=>{
+      const id=tr.dataset.id; const o=v[id]||{};
+      $('#devId').value=id; selectDrop($('#devSess'), o.assignedSession||''); $('#devEnabled').checked = !!o.enabled;
+    });
+  }
+
+  // ===================== LIVE / STATES / MANUAL / CSV =====================
+  const pLive=document.createElement('div'); pLive.className='panel';
+  pLive.innerHTML=`
+    <h3>LIVE & STATES</h3>
+    <div class="row">
+      <select id="liveSess" style="min-width:240px"></select>
+      <button id="watchLive" class="btn ok">Start Live</button>
+      <button id="exportCsv" class="btn primary">Export CSV</button>
+      <span class="small">Live updates directly from Firebase</span>
+    </div>
+    <div class="row">
+      <input id="manUid" placeholder="ID/Student Name">
+      <select id="manEvt">
+        <option>ENTRY</option><option>TOILET_OUT</option><option>TOILET_IN</option><option>EXIT</option>
+      </select>
+      <button id="btnManual" class="btn">Manual Mark</button>
+      <span class="small">Enter UID, ID or name for the selected session</span>
+    </div>
+    <div>
+      <h4>Current States</h4>
+      <table><thead><tr><th>UID</th><th>State</th><th>Last Event</th><th>Last Time</th><th>Session</th></tr></thead>
+      <tbody id="stateBody"></tbody></table>
+    </div>
+    <div>
+      <h4>Live Log</h4>
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th><th>UID</th><th>ID</th><th style="min-width:220px;white-space:nowrap">Name</th><th>Intake</th>
+            <th>Course</th><th>Event</th><th>time in</th><th>toilet out</th>
+            <th>toilet in</th><th>exit</th><th>device</th>
+          </tr>
+        </thead>
+        <tbody id="liveBody"></tbody>
+      </table>
+    </div>`;
+  document.body.append(pLive);
+
+  // Populate dropdown sesi segera seperti di Devices
+  {
+    const sel=$('#liveSess');
+    if(sel){
+      sel.innerHTML='';
+      const v=(await get(ref(db,'sessions'))).val()||{};
+      Object.keys(v).forEach(k=>{ const o=document.createElement('option'); o.value=k; o.textContent=k; sel.append(o); });
+    }
+  }
+
+  let liveUnsub=null, stateUnsub=null, lastRows=[];
+
+  // Bersih listener sebelum halaman ditutup/bertukar untuk kurangkan ERR_ABORTED
+  window.addEventListener('beforeunload', ()=>{
+    try { if(typeof liveUnsub==='function') liveUnsub(); } catch(e){}
+    try { if(typeof stateUnsub==='function') stateUnsub(); } catch(e){}
+  });
+
+  $('#watchLive').onclick=()=>{
+    const sid=$('#liveSess').value; if(!sid) return alert('Please select a session');
+    if(liveUnsub){ liveUnsub(); liveUnsub=null; }
+    if(stateUnsub){ stateUnsub(); stateUnsub=null; }
+    startLive(sid);
+    watchStates(sid); // tapis states ikut session
+  };
+
+  $('#exportCsv').onclick=()=> exportCsv($('#liveSess').value, lastRows);
+
+  // --- Live attendance (1 baris per UID) ---
+  function startLive(sid){
+    const qy = query(ref(db,'attendance/'+sid), orderByChild('ts'), limitToLast(2000));
+    const unsub = onValue(qy, async snap=>{
+      const att = snap.val() || {};
+
+      // ambil students & summary untuk join intake/course + cap masa event
+      const [studentsSnap, summarySnap] = await Promise.all([
+        get(ref(db,'students')),
+        get(ref(db,'summary/'+sid))
+      ]);
+      const students = studentsSnap.val() || {};
+      const summary  = summarySnap.val()  || {};
+
+      // fallback: derive masa bagi setiap event daripada rekod attendance
+      const perEv = {};
+      Object.values(att).forEach(r=>{
+        const uid = r.uid || ''; if(!uid) return;
+        const ev  = r.event || ''; const t = r.ts || 0; if(!ev||!t) return;
+        const cur = perEv[uid] || {ENTRY:0, TOILET_OUT:0, TOILET_IN:0, EXIT:0};
+        if(t > (cur[ev]||0)) cur[ev] = t;
+        perEv[uid] = cur;
+      });
+
+      // group ikut UID -> satu baris per pelajar (ambil rekod attendance TERKINI)
+      const perUid = {};
+      Object.values(att).forEach(r=>{
+        const uid = r.uid || ''; if(!uid) return;
+        if(!perUid[uid] || r.ts > perUid[uid].lastTs){
+          perUid[uid] = {
+            uid,
+            lastTs: r.ts || 0,
+            lastEvent: r.event || '',
+            studentId: r.studentId || '',
+            name: r.name || '',
+            deviceId: r.deviceId || ''
+          };
+        }
+      });
+
+      // bina rows akhir (join students + summary)
+      const rows = Object.values(perUid).map(row=>{
+        const st = students[row.uid] || {};
+        const sm = summary[row.uid]  || {};
+        const ev = perEv[row.uid]    || {};
+        return {
+          time: row.lastTs, uid: row.uid, studentId: row.studentId || st.studentId || '',
+          name: row.name || st.name || '', intake: st.intake || '', course: st.course || '',
+          event: row.lastEvent, entryTs: sm.entryTs||ev.ENTRY||'', toiletOutLast: sm.toiletOutLast||ev.TOILET_OUT||'',
+          toiletInLast: sm.toiletInLast||ev.TOILET_IN||'', exitTs: sm.exitTs||ev.EXIT||'', deviceId: row.deviceId||''
+        };
+      }).sort((a,b)=>b.time-a.time);
+
+      lastRows = rows;
+
+      $('#liveBody').innerHTML = rows.length
+        ? rows.map(r=>`
+          <tr>
+            <td>${ts(r.time)}</td>
+            <td>${r.uid}</td>
+            <td>${r.studentId}</td>
+            <td>${(r.name||'').replace(/</g,'&lt;')}</td>
+            <td>${r.intake}</td>
+            <td>${r.course}</td>
+            <td>${r.event}</td>
+            <td>${ts(r.entryTs)}</td>
+            <td>${ts(r.toiletOutLast)}</td>
+            <td>${ts(r.toiletInLast)}</td>
+            <td>${ts(r.exitTs)}</td>
+            <td>${r.deviceId}</td>
+          </tr>`).join('')
+        : `<tr><td colspan="12" class="small">No records for this session yet.</td></tr>`;
+    });
+    liveUnsub = ()=>unsub();
+  }
+
+  // --- States ditapis ikut sessionId ---
+  function watchStates(sid){
+    const q = query(ref(db,'states'), orderByChild('sessionId'), equalTo(sid));
+    const unsub = onValue(q, snap=>{
+      const v=snap.val()||{};
+      const rows = Object.entries(v).map(([uid,o])=>({uid,...o})).sort((a,b)=> (b.lastTs||0)-(a.lastTs||0));
+      $('#stateBody').innerHTML = rows.length
+        ? rows.map(r=>`<tr><td>${r.uid}</td><td>${r.state}</td><td>${r.lastEvent||''}</td><td>${r.lastTs?ts(r.lastTs):''}</td><td>${r.sessionId||''}</td></tr>`).join('')
+        : `<tr><td colspan="5" class="small">No state for this session.</td></tr>`;
+    });
+    stateUnsub = ()=>unsub();
+  }
+
+  // ===== Manual mark (kekal logik once-only di backend/ESP) =====
+  $('#btnManual').onclick = async ()=>{
+    const sid=$('#liveSess').value; const q=($('#manUid').value||'').trim(); const evt=$('#manEvt').value;
+    if(!sid||!q) return alert('Select session & enter ID/Name/UID');
+
+    // Cari pelajar berdasarkan UID, ID atau padanan nama
+    const studsSnap = await get(ref(db,'students'));
+    const studs = studsSnap.val()||{};
+    let uid=q; let st = studs[uid];
+    if(!st){
+      const byId = Object.entries(studs).filter(([k,o])=> String(o.studentId||'').toLowerCase()===q.toLowerCase());
+      if(byId.length===1){ uid=byId[0][0]; st=byId[0][1]; }
+    }
+    if(!st){
+      const byName = Object.entries(studs).filter(([k,o])=> String(o.name||'').toLowerCase().includes(q.toLowerCase()));
+      if(byName.length===1){ uid=byName[0][0]; st=byName[0][1]; }
+      else if(byName.length>1){
+        alert('Multiple name matches found. Please enter a more specific ID. Example:\n'+byName.slice(0,5).map(([k,o])=>`${o.name} (${o.studentId}) [${k}]`).join('\n'));
+        return;
+      }
+    }
+    if(!st) return alert('Student not found. Enter UID, full ID, or exact name.');
+
+    const [sumSnap, stateSnap] = await Promise.all([
+      get(ref(db,'summary/'+sid+'/'+uid)),
+      get(ref(db,'states/'+uid))
+    ]);
+    const sum = sumSnap.val()||{}; const state = stateSnap.val()||{};
+
+    // Sekatan:
+    if(evt==='ENTRY'){
+      if(sum.entryTs || state.state==='IN') return alert('ENTRY already recorded. Cannot record twice.');
+    }
+    if(evt==='TOILET_OUT'){
+      if((sum.toiletCount||0) >= 1) return alert('TOILET_OUT allowed only once.');
+      if(state.state!=='IN') return alert('Cannot TOILET_OUT if not IN.');
+    }
+    if(evt==='TOILET_IN'){
+      if(sum.toiletInLast) return alert('TOILET_IN allowed only once.');
+      if(!sum.toiletOutLast) return alert('Cannot TOILET_IN without TOILET_OUT.');
+    }
+    if(evt==='EXIT'){
+      if(sum.exitTs) return alert('EXIT already recorded. Cannot record twice.');
+      if(state.state!=='IN' && state.state!=='TOILET_OUT') return alert('Cannot EXIT if not IN.');
+    }
+
+    const now = Math.floor(Date.now()/1000);
+    const rec = {uid, studentId:st.studentId||'', name:st.name||'', event:evt, deviceId:'ADMIN', ts: now, source:'manual' };
+    await push(ref(db,'attendance/'+sid), rec);
+
+    const next = (evt=="ENTRY" ? "IN" : (evt=="EXIT" ? "OUT" : (evt=="TOILET_OUT" ? "TOILET_OUT" : "IN")));
+    await update(ref(db,'states/'+uid), {state:next,lastEvent:evt,lastTs:now,sessionId:sid});
+
+    const sumRef = ref(db,'summary/'+sid+'/'+uid);
+    const cur = sum;
+    if(evt=="ENTRY") cur.entryTs = now;
+    if(evt=="EXIT") cur.exitTs   = now;
+    if(evt=="TOILET_OUT"){ cur.toiletOutLast=now; cur.toiletCount=(cur.toiletCount||0)+1; }
+    if(evt=="TOILET_IN"){ cur.toiletInLast=now; }
+    await set(sumRef, cur);
+
+    alert('Manual marked: '+evt);
+  };
+
+  // ===================== Export CSV (susunan baru) =====================
+  function exportCsv(sessionId, rows){
+    if(!sessionId) return alert('Please select a session first');
+    if(!rows?.length) return alert('No data to export');
+    const header = ['Time','UID','ID','Name','Intake','Course','Event','time in','toilet out','toilet in','exit','device'];
+    const lines = [header.join(',')].concat(rows.map(r=>[
+      fmtISO(r.time), r.uid||'', r.studentId||'', (r.name||'').replace(/,/g,' '),
+      (r.intake||'').replace(/,/g,' '), (r.course||'').replace(/,/g,' '),
+      r.event||'',
+      fmtISO(r.entryTs), fmtISO(r.toiletOutLast), fmtISO(r.toiletInLast), fmtISO(r.exitTs),
+      r.deviceId||''
+    ].join(',')));
+    const blob = new Blob([lines.join('\n')],{type:'text/csv'});
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+    a.download = sessionId+'_attendance.csv'; a.click();
+  }
+
+  // ===================== UTIL & BOOT =====================
+  function selectDrop(sel, val){
+    if(!val) return;
+    for (const o of sel.options) { if (o.value === val) { sel.value = val; break; } }
+  }
+  async function fillLiveSess(){
+    const sel=$('#liveSess'); if(!sel) return; // element not in this view
+    sel.innerHTML='';
+    const v=(await get(ref(db,'sessions'))).val()||{};
+    const keys = Object.keys(v);
+    if(keys.length===0){
+      const o=document.createElement('option');
+      o.value=''; o.textContent='No sessions — add in View Session';
+      o.disabled=true; o.selected=true; sel.append(o);
+      return;
+    }
+    keys.forEach(k=>{const o=document.createElement('option'); o.value=k; o.textContent=k; sel.append(o);});
+  }
+  async function fillAssignSess(){
+    const sel=$('#assignSess'); if(!sel) return;
+    sel.innerHTML='';
+    const v=(await get(ref(db,'sessions'))).val()||{};
+    Object.keys(v).forEach(k=>{const o=document.createElement('option');o.value=k;o.textContent=k;sel.append(o);});
+  }
+  async function fillDevSess(){
+    const sel=$('#devSess'); if(!sel) return;
+    sel.innerHTML='';
+    const v=(await get(ref(db,'sessions'))).val()||{};
+    Object.keys(v).forEach(k=>{const o=document.createElement('option');o.value=k;o.textContent=k;sel.append(o);});
+  }
+  async function loadDevices(){
+    const body = $('#devBody'); if(!body) return; // devices table not in this view
+    const v=(await get(ref(db,'devices'))).val()||{};
+    const rows = Object.entries(v).map(([k,o])=>({id:k,...o}));
+    body.innerHTML = rows.map(r=>`<tr data-id="${r.id}">
+      <td>${r.id}</td><td>${r.assignedSession||''}</td><td>${r.enabled?'yes':'no'}</td><td>${r.lastSeen? ts(r.lastSeen):''}</td></tr>`).join('');
+    $$('#devBody tr').forEach(tr=> tr.onclick=()=>{
+      const id=tr.dataset.id; const o=v[id]||{};
+      const devIdEl=$('#devId'), devSessEl=$('#devSess'), devEnabledEl=$('#devEnabled');
+      if(devIdEl) devIdEl.value=id;
+      if(devSessEl) selectDrop(devSessEl, o.assignedSession||'');
+      if(devEnabledEl) devEnabledEl.checked = !!o.enabled;
+    });
+  }
+  async function boot(){
+    await loadSessions();
+    await loadStudentTable();
+    await Promise.all([fillAssignSess(), fillDevSess(), loadDevices(), fillLiveSess()]);
+  }
+</script>
+</body>
+</html>

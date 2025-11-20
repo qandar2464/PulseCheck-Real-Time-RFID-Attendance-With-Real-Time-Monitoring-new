@@ -1,0 +1,680 @@
+/**************************************************************
+ *  UPTM Exam System - ESP32 (ULTRA FAST - Final Fixed v3.1 - RGB Edition + Dual-Hold Reboot)
+ *  - Replace dual LEDs with single RGB module (R,G,B,GND)
+ *  - Dual-button 7s hold → esp_restart()
+ *  - All other functions/logic preserved
+ **************************************************************/
+
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <SPI.h>
+#include <MFRC522.h>
+#include <time.h>
+#include "esp_system.h" // for esp_restart()
+
+/* ====== KONFIG TLS (pilihan) ====== */
+// Kekal seperti asal (tidak diubah)
+#define USE_INSECURE_TLS 1
+// const char* GOOGLE_ROOT_CA = nullptr; // placeholder
+
+/* ====== QUEUE (letak paling atas) ====== */
+struct ScanEvent { String uid,name,sid,event; bool isLate; unsigned long ts; };
+static const int QSZ = 16;
+static ScanEvent q[QSZ];
+static volatile int qh = 0, qt = 0;
+
+static bool queue_push(const ScanEvent &item);
+static bool queue_pop(ScanEvent &out);
+static void uploaderTask(void*);
+
+/* ================== WIFI ================== */
+#define WIFI_SSID "Hafiz’s iPhone"
+#define WIFI_PASS "kambingbingbing"
+
+/* ================== FIREBASE ================== */
+#define FB_DB_URL  "https://exam-attendance-uptm-default-rtdb.asia-southeast1.firebasedatabase.app"
+#define FB_API_KEY "AIzaSyDcRcK3K6PGO8Q3HhkUCjzpG5TtI_VtqUk"
+#define DEVICE_ID  "esp32_2"
+
+#define FIREBASE_EMAIL "device@test.local"
+#define FIREBASE_PASS  "test1234"
+
+/* ================== PINS ================== */
+// --- Gantian LED kepada RGB module (4 pin: R,G,B,GND) ---
+#define RGB_R 25
+#define RGB_G 33
+#define RGB_B 4
+
+#define BUZZER    32
+#define BTN_MODE  26
+#define BTN_TOI   14
+
+// RC522
+#define RST_PIN   27
+#define SS_PIN    5
+
+/* ================== LCD & RFID ================== */
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+MFRC522 mfrc522(SS_PIN, RST_PIN);
+
+/* ================== STATE ================== */
+enum { UI_ENTRY=0, UI_TOILET=1, UI_EXIT=2 };
+int  uiMode = UI_ENTRY;
+bool toiletOutNext = true;   // UI toggle di mode toilet
+
+struct DevState { String state; unsigned long lastTs; String sid; };
+
+String currentSession = "";
+String idToken = "";
+unsigned long tokenExp = 0;
+String refreshToken = ""; // untuk refresh tanpa login semula
+
+// WiFi auto-reconnect backoff
+unsigned long lastWifiCheckMs = 0;
+unsigned long wifiRetryDelayMs = 5000; // bermula 5s, naik sehingga 60s
+
+unsigned long nowSecFallback() { return 1735689600UL + millis()/1000; }
+unsigned long nowSec(){ time_t t; time(&t); return (t>1700000000)?(unsigned long)t:nowSecFallback(); }
+
+/* ================== SPEED ================== */
+unsigned long COOLDOWN_MS = 800;
+
+/* ================== SESSION CACHE ================== */
+struct SessMeta { long startEpoch=0; long graceMin=10; };
+SessMeta curSess;
+
+static const int MAX_WL = 128;     // <100 pelajar per kelas
+String wlUid[MAX_WL]; int wlCount=0;
+
+struct Stu { String uid,name,sid; };
+Stu stuCache[MAX_WL]; int stuCount=0;
+
+/* ===== Once-only flags (cache dari summary) ===== */
+struct Flags { bool e=false, to=false, ti=false, ex=false; };
+Flags flagCache[MAX_WL]; // sama index dengan stuCache/wlUid bila mapping dibuat
+
+/* === helpers untuk cache === */
+void wlClear(){ wlCount=0; }
+void wlAdd(const String& uid){ if(wlCount<MAX_WL) wlUid[wlCount++]=uid; }
+bool wlHas(const String& uid){ for(int i=0;i<wlCount;i++) if(wlUid[i]==uid) return true; return false; }
+
+void stuClear(){ stuCount=0; }
+void stuAdd(const String& uid, const String& name, const String& sid){
+  if(stuCount<MAX_WL){ stuCache[stuCount++] = {uid,name,sid}; }
+}
+int findIndexByUid(const String& uid){
+  for(int i=0;i<stuCount;i++) if(stuCache[i].uid==uid) return i;
+  return -1;
+}
+bool stuFind(const String& uid, String &name, String &sid){
+  int ix = findIndexByUid(uid);
+  if(ix<0) return false;
+  name = stuCache[ix].name; sid = stuCache[ix].sid; return true;
+}
+
+/* ====== anti-spam globals ====== */
+String lastUid=""; unsigned long lastUidMs=0;
+
+/* ================== UI HELPERS ================== */
+void beep(int n=1){
+  pinMode(BUZZER, OUTPUT);
+  for(int i=0;i<n;i++){ tone(BUZZER, 2000); delay(60); noTone(BUZZER); delay(40); }
+}
+void lcdTitle(){
+  lcd.setCursor(0,0); lcd.print("UPTM Exam System");
+  lcd.setCursor(0,1);
+  if(uiMode==UI_ENTRY) lcd.print("MODE: ENTRY   ");
+  else if(uiMode==UI_TOILET) lcd.print(toiletOutNext? "MODE: TOIL OUT":"MODE: TOIL IN ");
+  else lcd.print("MODE: EXIT    ");
+}
+void showUIDInline(const String& uid){
+  lcd.setCursor(0,0); lcd.print("UID:            ");
+  lcd.setCursor(4,0); lcd.print(uid);
+}
+void showStatusLine(const String& s){
+  String t=s; while(t.length()<16) t+=' ';
+  lcd.setCursor(0,1); lcd.print(t.substring(0,16));
+}
+
+// ===== Helper baru untuk RGB (common cathode: HIGH=ON) =====
+void rgbColor(bool r, bool g, bool b){
+  digitalWrite(RGB_R, r ? HIGH : LOW);
+  digitalWrite(RGB_G, g ? HIGH : LOW);
+  digitalWrite(RGB_B, b ? HIGH : LOW);
+
+  // Jika modul kamu adalah common anode (VCC), guna invers ini:
+  // digitalWrite(RGB_R, r ? LOW : HIGH);
+  // digitalWrite(RGB_G, g ? LOW : HIGH);
+  // digitalWrite(RGB_B, b ? LOW : HIGH);
+}
+
+/* ================== WIFI ================== */
+void connectWiFi(){
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  showStatusLine("WiFi...");
+  unsigned long t0=millis();
+  while(WiFi.status()!=WL_CONNECTED && millis()-t0<20000){ delay(200); }
+  if(WiFi.status()==WL_CONNECTED){
+    showStatusLine("WiFi OK");
+    Serial.printf("[WiFi] IP: %s, RSSI: %d\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
+  } else {
+    showStatusLine("WiFi FAIL");
+  }
+}
+
+/* ================== HTTPS HELPERS ================== */
+bool httpGet(const String& url, String& resp){
+  if(WiFi.status()!=WL_CONNECTED){ return false; }
+  WiFiClientSecure client;
+#if USE_INSECURE_TLS
+  client.setInsecure();
+#else
+  // client.setCACert(GOOGLE_ROOT_CA);
+  client.setInsecure(); // kekal seperti asal
+#endif
+  HTTPClient http; http.setReuse(true); http.setTimeout(4000);
+  if(!http.begin(client, url)) return false;
+  int code=http.GET();
+  if(code>=200 && code<300){ resp=http.getString(); http.end(); return true; }
+  http.end(); return false;
+}
+bool httpPostJson(const String& url, const String& body, String& respOut){
+  if(WiFi.status()!=WL_CONNECTED){ return false; }
+  WiFiClientSecure client;
+#if USE_INSECURE_TLS
+  client.setInsecure();
+#else
+  // client.setCACert(GOOGLE_ROOT_CA);
+  client.setInsecure();
+#endif
+  HTTPClient http; http.setReuse(true); http.setTimeout(4000);
+  if(!http.begin(client, url)) return false;
+  http.addHeader("Content-Type","application/json");
+  int code=http.POST(body);
+  respOut = (code>0)? http.getString() : "";
+  http.end(); return (code>=200 && code<300);
+}
+bool httpPatchJson(const String& url, const String& body){
+  if(WiFi.status()!=WL_CONNECTED){ return false; }
+  WiFiClientSecure client;
+#if USE_INSECURE_TLS
+  client.setInsecure();
+#else
+  // client.setCACert(GOOGLE_ROOT_CA);
+  client.setInsecure();
+#endif
+  HTTPClient http; http.setReuse(true); http.setTimeout(4000);
+  if(!http.begin(client, url)) return false;
+  http.addHeader("Content-Type","application/json");
+  int code=http.PATCH(body);
+  http.end(); return (code>=200 && code<300);
+}
+// POST x-www-form-urlencoded untuk refresh token
+bool httpPostForm(const String& url, const String& formBody, String& respOut){
+  if(WiFi.status()!=WL_CONNECTED){ return false; }
+  WiFiClientSecure client;
+#if USE_INSECURE_TLS
+  client.setInsecure();
+#else
+  // client.setCACert(GOOGLE_ROOT_CA);
+  client.setInsecure();
+#endif
+  HTTPClient http; http.setReuse(true); http.setTimeout(4000);
+  if(!http.begin(client, url)) return false;
+  http.addHeader("Content-Type","application/x-www-form-urlencoded");
+  int code=http.POST(formBody);
+  respOut = (code>0)? http.getString() : "";
+  http.end(); return (code>=200 && code<300);
+}
+bool patchMulti(const String& bodyJson){
+  if(idToken=="") return false;
+  String url = String(FB_DB_URL) + "/.json?auth=" + idToken;
+  return httpPatchJson(url, bodyJson);
+}
+
+/* ================== AUTH ================== */
+bool signInEmailPassword(){
+  String url = "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=" + String(FB_API_KEY);
+  StaticJsonDocument<512> d;
+  d["email"]=FIREBASE_EMAIL; d["password"]=FIREBASE_PASS; d["returnSecureToken"]=true;
+  String body; serializeJson(d, body);
+  String resp;
+  if(!httpPostJson(url, body, resp)) return false;
+  DynamicJsonDocument j(1536); if(deserializeJson(j, resp)) return false;
+  idToken = j["idToken"].as<String>();
+  refreshToken = j["refreshToken"].as<String>();
+  int expiresIn = j["expiresIn"] | 3600;
+  tokenExp = nowSec() + expiresIn - 60;
+  Serial.println("[Auth] OK");
+  return idToken.length()>0;
+}
+bool refreshIdToken(){
+  if(refreshToken=="") return false;
+  String url = "https://securetoken.googleapis.com/v1/token?key=" + String(FB_API_KEY);
+  String body = String("grant_type=refresh_token&refresh_token=") + refreshToken;
+  String resp;
+  if(!httpPostForm(url, body, resp)) return false;
+  DynamicJsonDocument j(1536); if(deserializeJson(j, resp)) return false;
+  idToken = j["id_token"].as<String>();
+  refreshToken = j["refresh_token"].as<String>();
+  int expiresIn = j["expires_in"] | 3600;
+  tokenExp = nowSec() + expiresIn - 60;
+  Serial.println("[Auth] Refresh OK");
+  return idToken.length()>0;
+}
+bool ensureToken(){
+  if(idToken=="") return signInEmailPassword();
+  if(nowSec()>tokenExp){
+    if(refreshToken!="" && refreshIdToken()) return true;
+    return signInEmailPassword();
+  }
+  return true;
+}
+String withAuth(const String& path){ return String(FB_DB_URL) + path + "?auth=" + idToken; }
+
+/* ================== WIFI RECONNECT (backoff) ================== */
+void ensureWiFi(){
+  unsigned long ms = millis();
+  if(WiFi.status()==WL_CONNECTED) return;
+  if(ms - lastWifiCheckMs < wifiRetryDelayMs) return;
+  lastWifiCheckMs = ms;
+  Serial.println("[WiFi] Reconnecting...");
+  connectWiFi();
+  if(WiFi.status()==WL_CONNECTED){
+    wifiRetryDelayMs = 5000; // reset bila berjaya
+    showStatusLine("WiFi OK         ");
+  } else {
+    wifiRetryDelayMs = (wifiRetryDelayMs < 60000) ? (wifiRetryDelayMs * 2) : 60000;
+    showStatusLine("WiFi retry...");
+  }
+}
+
+/* ================== PREFETCH (session change) ================== */
+void prefetchStudentsForWhitelist(){
+  stuClear();
+  for(int i=0;i<wlCount;i++){
+    String uid = wlUid[i];
+
+    // /students/<uid>
+    String sj;
+    if(httpGet(withAuth("/students/"+uid+".json"), sj) && sj!="null"){
+      DynamicJsonDocument j(512);
+      if(!deserializeJson(j, sj)){
+        String name = j["name"] | "";
+        String sid  = j["studentId"] | "";
+        if(name.length()) stuAdd(uid, name, sid);
+      }
+    }
+
+    // /summary/<sid>/<uid> → set flags
+    String sumj;
+    if(httpGet(withAuth("/summary/"+currentSession+"/"+uid+".json"), sumj) && sumj!="null"){
+      DynamicJsonDocument s(512);
+      if(!deserializeJson(s, sumj)){
+        int ix = findIndexByUid(uid);
+        if(ix>=0){
+          flagCache[ix].e  = (long)(s["entryTs"]|0)        > 0;
+          flagCache[ix].to = (long)(s["toiletOutLast"]|0)  > 0;
+          flagCache[ix].ti = (long)(s["toiletInLast"]|0)   > 0;
+          flagCache[ix].ex = (long)(s["exitTs"]|0)         > 0;
+        }
+      }
+    }
+
+    delay(5);
+  }
+  Serial.printf("[Students] cached %d; flags primed\n", stuCount);
+}
+
+void clearAllFlags(){
+  for(int i=0;i<MAX_WL;i++){ flagCache[i] = Flags{}; }
+}
+
+void fetchAssignedSession(){
+  if(!ensureToken()) return;
+
+  String respSid;
+  if(httpGet(withAuth("/devices/" DEVICE_ID "/assignedSession.json"), respSid) && respSid!="null"){
+    String newSid=respSid; newSid.replace("\"","");
+
+    bool changed = (newSid != currentSession);
+    currentSession = newSid;
+    Serial.println(String("[Device] Session: ")+currentSession);
+
+    if(changed && currentSession!=""){
+      // meta sesi
+      String sj; 
+      if(httpGet(withAuth("/sessions/"+currentSession+".json"), sj)){
+        DynamicJsonDocument s(512); 
+        if(!deserializeJson(s, sj)){
+          curSess.startEpoch = (long)(s["startEpoch"] | 0);
+          curSess.graceMin   = (long)(s["graceMin"]   | 10);
+          Serial.printf("[SessMeta] start=%ld grace=%ld\n", curSess.startEpoch, curSess.graceMin);
+        }
+      }
+      // whitelist
+      wlClear();
+      String wj;
+      if(httpGet(withAuth("/sessionStudents/"+currentSession+".json"), wj) && wj!="null"){
+        DynamicJsonDocument w(4096);
+        if(!deserializeJson(w, wj)){
+          for (JsonPair kv : w.as<JsonObject>()){
+            wlAdd(String(kv.key().c_str()));
+          }
+          Serial.printf("[Whitelist] %d UIDs\n", wlCount);
+        }
+      }
+      // reset flags & prefetch students + summary flags
+      clearAllFlags();
+      prefetchStudentsForWhitelist();
+
+      // naikkan gain antena
+      mfrc522.PCD_SetAntennaGain(MFRC522::RxGain_max);
+    }
+  }
+}
+
+void heartbeat(){
+  if(!ensureToken()) return;
+  String url = withAuth("/devices/" DEVICE_ID ".json");
+  StaticJsonDocument<256> j; j["lastSeen"] = (long)nowSec();
+  String body; serializeJson(j, body); httpPatchJson(url, body);
+}
+
+/* ================== QUEUE (IMPLEMENTASI — SATU KALI SAHAJA) ================== */
+static bool queue_push(const ScanEvent &item){
+  int n = (qh + 1) % QSZ;
+  if (n == qt) return false;
+  q[qh] = item; qh = n; 
+  return true;
+}
+static bool queue_pop(ScanEvent &out){
+  if (qt == qh) return false;
+  out = q[qt]; qt = (qt + 1) % QSZ; 
+  return true;
+}
+
+/* ================== UPLOADER TASK ================== */
+static void uploaderTask(void*){
+  ScanEvent ev; bool hasPending=false; int attempts=0;
+  for(;;){
+    ensureWiFi();
+    if(!hasPending){
+      if(!queue_pop(ev)){ vTaskDelay(100/portTICK_PERIOD_MS); continue; }
+      attempts=0; hasPending=true;
+    }
+    if(!ensureToken()){ vTaskDelay(2000/portTICK_PERIOD_MS); continue; }
+
+    // attendance
+    StaticJsonDocument<512> a;
+    a["uid"]=ev.uid; a["name"]=ev.name; a["studentId"]=ev.sid;
+    a["event"]=ev.event; a["deviceId"]=DEVICE_ID;
+    a["ts"]=(long)ev.ts; if(ev.isLate && ev.event=="ENTRY") a["isLate"]=true; a["source"]="device";
+    String ab; serializeJson(a, ab); String rr;
+    bool okAtt = httpPostJson(withAuth("/attendance/"+currentSession+".json"), ab, rr);
+
+    // states + summary multi-patch (kekal seperti asal: guna leading "/" seperti kod kamu)
+    StaticJsonDocument<1024> up;
+    String next = (ev.event=="ENTRY" ? "IN" :
+                   ev.event=="TOILET_OUT" ? "TOILET_OUT" :
+                   ev.event=="TOILET_IN"  ? "IN" : "OUT");
+
+    JsonObject st = up.createNestedObject( (String)"/states/"+ev.uid );
+    st["state"]=next; st["lastEvent"]=ev.event; st["lastTs"]=(long)ev.ts; st["sessionId"]=currentSession;
+
+    JsonObject sum = up.createNestedObject( (String)"/summary/"+currentSession+"/"+ev.uid );
+    if(ev.event=="ENTRY") sum["entryTs"]=(long)ev.ts;
+    else if(ev.event=="EXIT") sum["exitTs"]=(long)ev.ts;
+    else if(ev.event=="TOILET_OUT"){
+      sum["toiletOutLast"]=(long)ev.ts;
+      JsonObject inc = sum.createNestedObject("toiletCount");
+      JsonObject sv  = inc.createNestedObject(".sv");
+      sv["increment"] = 1;
+    } else if(ev.event=="TOILET_IN"){
+      sum["toiletInLast"]=(long)ev.ts;
+    }
+    String ub; serializeJson(up, ub);
+    bool okPatch = patchMulti(ub);
+
+    if(okAtt && okPatch){
+      hasPending=false; attempts=0;
+    } else {
+      attempts++;
+      int waitMs = 1000 * (1 << (attempts<6?attempts:5)); // hingga ~32s
+      Serial.printf("[Uploader] Fail, attempt %d, wait %dms\n", attempts, waitMs);
+      vTaskDelay(waitMs/portTICK_PERIOD_MS);
+      if(attempts>=5){
+        // cuba requeue supaya tidak hilang data
+        if(!queue_push(ev)){
+          Serial.println("[Uploader] Queue full, dropping after retries");
+        }
+        hasPending=false; attempts=0;
+      }
+    }
+  }
+}
+
+/* ================== LOGIC SEKAT SEKALI SAHAJA ================== */
+bool isEventAllowedOnce(const String& uid, const String& event, String& msg){
+  int ix = findIndexByUid(uid);
+  if(ix<0){ msg="Not registered"; return false; }
+
+  Flags &f = flagCache[ix];
+
+  if(event=="ENTRY"){
+    if(f.e){ msg="ENTRY already"; return false; }
+    return true;
+  }
+  if(event=="TOILET_OUT"){
+    if(!f.e){ msg="Need ENTRY first"; return false; }
+    if(f.to){ msg="TOILET_OUT already"; return false; }
+    if(f.ex){ msg="Already EXIT"; return false; }
+    return true;
+  }
+  if(event=="TOILET_IN"){
+    if(!f.to){ msg="No TOILET_OUT yet"; return false; }
+    if(f.ti){ msg="TOILET_IN already"; return false; }
+    if(f.ex){ msg="Already EXIT"; return false; }
+    return true;
+  }
+  if(event=="EXIT"){
+    if(!f.e){ msg="Need ENTRY first"; return false; }
+    if(f.ex){ msg="EXIT already"; return false; }
+    return true;
+  }
+
+  msg="Invalid event"; return false;
+}
+
+void markEventLocally(const String& uid, const String& event){
+  int ix = findIndexByUid(uid);
+  if(ix<0) return;
+  if(event=="ENTRY") flagCache[ix].e = true;
+  else if(event=="TOILET_OUT") flagCache[ix].to = true;
+  else if(event=="TOILET_IN")  flagCache[ix].ti = true;
+  else if(event=="EXIT")       flagCache[ix].ex = true;
+}
+
+/* ================== HANDLE SCAN (instant) ================== */
+void handleScan(const String& rawUid){
+  unsigned long ms = millis();
+  if(rawUid==lastUid && (ms-lastUidMs)<COOLDOWN_MS){
+    showStatusLine("Please wait...");
+    beep(1); delay(40); lcdTitle(); return;
+  }
+  lastUid=rawUid; lastUidMs=ms;
+
+  showUIDInline(rawUid);
+
+  // 1) whitelist
+  if(currentSession=="" || !wlHas(rawUid)){
+    showStatusLine("Not in session");
+    rgbColor(1,0,0); // merah
+    beep(2); delay(120);
+    rgbColor(0,0,0);
+    lcdTitle(); return;
+  }
+
+  // 2) student cache
+  String name,sid;
+  if(!stuFind(rawUid, name, sid)){
+    showStatusLine("Not registered");
+    rgbColor(1,0,0); // merah
+    beep(2); delay(120);
+    rgbColor(0,0,0);
+    lcdTitle(); return;
+  }
+
+  // 3) event dari UI
+  String event = (uiMode==UI_ENTRY ? "ENTRY"
+                 : (uiMode==UI_TOILET ? (toiletOutNext ? "TOILET_OUT" : "TOILET_IN")
+                                      : "EXIT"));
+
+  // 4) rule sekali sahaja (local flags)
+  String why;
+  if(!isEventAllowedOnce(rawUid, event, why)){
+    showStatusLine("Blocked: " + why);
+    rgbColor(1,0,0); // merah
+    beep(2); delay(120);
+    rgbColor(0,0,0);
+    lcdTitle(); return;
+  }
+
+  // 5) late calc
+  bool isLate = (event=="ENTRY" && curSess.startEpoch>0 && (long)nowSec() > (curSess.startEpoch + curSess.graceMin*60));
+
+  // 6) enqueue (non-blocking) + update flags local segera
+  ScanEvent ev{ rawUid, name, sid, event, isLate, (unsigned long)nowSec() };
+  if(!queue_push(ev)){ Serial.println("[Queue] Full, dropping"); }
+  markEventLocally(rawUid, event);
+
+  // auto-toggle butang toilet agar flow OUT→IN
+  if(uiMode==UI_TOILET){
+    if(event=="TOILET_OUT") toiletOutNext=false;
+    else if(event=="TOILET_IN") toiletOutNext=true;
+  }
+
+  // 7) instant feedback
+  rgbColor(0,1,0); // hijau
+  beep(1); delay(100);
+  rgbColor(0,0,0);
+  showStatusLine(event + " OK");
+  delay(60);
+  lcdTitle();
+}
+
+/* ================== DUAL-HOLD REBOOT ================== */
+void checkDualHoldReboot() {
+  static bool arming = false;
+  static unsigned long t0 = 0;
+  const unsigned long HOLD_MS = 7000;
+
+  bool bothPressed = (digitalRead(BTN_MODE) == LOW && digitalRead(BTN_TOI) == LOW);
+
+  if (bothPressed) {
+    if (!arming) {
+      arming = true;
+      t0 = millis();
+      showStatusLine("Hold 7s: REBOOT");
+      rgbColor(0,0,1); // biru → indikasi arming
+      beep(1);
+    } else {
+      unsigned long elapsed = millis() - t0;
+      if (elapsed >= HOLD_MS) {
+        showStatusLine("Rebooting...");
+        rgbColor(1,1,1); // putih sekejap
+        beep(2);
+        delay(300);
+        esp_restart();
+      } else {
+        int sLeft = (int)((HOLD_MS - elapsed + 999)/1000);
+        lcd.setCursor(0,1);
+        char buf[17];
+        snprintf(buf, sizeof(buf), "REBOOT in: %2ds", sLeft);
+        String line(buf);
+        while(line.length()<16) line+=' ';
+        lcd.print(line.substring(0,16));
+      }
+    }
+  } else if (arming) {
+    // dilepaskan sebelum cukup 7s → batal
+    arming = false;
+    rgbColor(0,0,0);
+    lcdTitle();
+  }
+}
+
+/* ================== SETUP / LOOP ================== */
+unsigned long lastBeat=0;
+
+void setup(){
+  Serial.begin(115200);
+
+  // Pin modes
+  pinMode(RGB_R,OUTPUT); pinMode(RGB_G,OUTPUT); pinMode(RGB_B,OUTPUT);
+  pinMode(BUZZER,OUTPUT); pinMode(BTN_MODE,INPUT_PULLUP); pinMode(BTN_TOI,INPUT_PULLUP);
+
+  // Pastikan LED padam pada permulaan
+  rgbColor(0,0,0);
+
+  Wire.begin(); lcd.init(); lcd.backlight();
+  lcd.clear(); lcdTitle();
+
+  SPI.begin();  
+  SPI.setFrequency(10000000);
+  mfrc522.PCD_Init();
+  mfrc522.PCD_SetAntennaGain(MFRC522::RxGain_max);
+
+  WiFi.setSleep(false); // kekalkan sambungan lebih stabil
+  connectWiFi();
+
+  configTime(8*3600, 0, "pool.ntp.org", "time.nist.gov");
+  for(int i=0;i<20;i++){ time_t t; time(&t); if(t>1700000000) break; delay(150); }
+
+  ensureToken();
+  showStatusLine(idToken!=""? "Auth OK" : "Auth FAIL");
+
+  fetchAssignedSession(); heartbeat();
+
+  xTaskCreatePinnedToCore(uploaderTask, "uploader", 6144, NULL, 1, NULL, 1);
+}
+
+void loop(){
+  ensureWiFi();
+
+  // --- Semak dual-hold reboot dahulu
+  checkDualHoldReboot();
+
+  // Jika kedua-dua butang sedang ditekan, elak handler biasa (supaya countdown 7s tidak terganggu)
+  bool bothPressed = (digitalRead(BTN_MODE)==LOW && digitalRead(BTN_TOI)==LOW);
+
+  // butang mode (hanya bila bukan kedua-dua ditekan)
+  if(!bothPressed && digitalRead(BTN_MODE)==LOW){
+    uiMode=(uiMode==UI_ENTRY?UI_TOILET:(uiMode==UI_TOILET?UI_EXIT:UI_ENTRY));
+    lcdTitle(); beep(1); delay(120);
+    while(digitalRead(BTN_MODE)==LOW){}
+  }
+
+  // butang toggle toilet OUT/IN (hanya bila bukan kedua-dua ditekan)
+  if(!bothPressed && digitalRead(BTN_TOI)==LOW && uiMode==UI_TOILET){
+    toiletOutNext=!toiletOutNext; lcdTitle(); beep(1); delay(120);
+    while(digitalRead(BTN_TOI)==LOW){}
+  }
+
+  // RFID
+  if(mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()){
+    String uid = ""; 
+    for(byte i=0;i<mfrc522.uid.size;i++){ if(mfrc522.uid.uidByte[i]<0x10) uid+="0"; uid+=String(mfrc522.uid.uidByte[i],HEX); }
+    uid.toUpperCase();
+    Serial.println("[Scan] " + uid);
+    handleScan(uid);
+    mfrc522.PICC_HaltA();
+  }
+
+  // heartbeat + refresh every 20s (juga refresh cache bila SID bertukar)
+  if(millis()-lastBeat>20000){ lastBeat=millis(); heartbeat(); fetchAssignedSession(); }
+}

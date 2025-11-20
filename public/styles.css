@@ -1,0 +1,208 @@
+/* Theme & base (minimal, modern) */
+:root {
+  --bg:#ffffff;         /* white background */
+  --panel:#ffffff;      /* card surface */
+  --muted:#6b7280;      /* gray-500 */
+  --text:#111827;       /* gray-900 */
+  --accent:#4f46e5;     /* indigo-600 */
+  --danger:#dc2626;     /* red-600 */
+  --ok:#16a34a;         /* green-600 */
+  --line:#e5e7eb;       /* divider */
+}
+/* Dark theme overrides via body.theme-dark */
+.theme-dark{
+  --bg:#111111;        /* hitam lembut (bukan pekat) */
+  --panel:#1a1a1a;     /* permukaan sedikit cerah */
+  --muted:#b0b6c0;     /* teks sekunder lebih jelas */
+  --text:#f0f1f3;      /* putih lembut, tidak terlalu terang */
+  --accent:#3b82f6;    /* biru terang untuk kontras manis */
+  --danger:#ef4444;    /* merah */
+  --ok:#22c55e;        /* hijau */
+  --line:#2a2a2a;      /* pembahagi halus */
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,Segoe UI,Arial,sans-serif}
+/* Auth gate: sembunyikan kandungan sehingga login disahkan */
+html.auth-check body{opacity:0; pointer-events:none}
+
+/* Admin navbar */
+.admin-nav{
+  position:sticky; top:0; z-index:20;
+  display:flex; align-items:center; justify-content:space-between;
+  padding:12px 18px; border-bottom:1px solid var(--line);
+  background:#ffffffee; backdrop-filter:blur(6px);
+}
+.theme-dark .admin-nav{ background:#121212e6; }
+.admin-nav .brand{font-weight:600;letter-spacing:.2px;color:#1f2937}
+.theme-dark .admin-nav .brand{color:#c7d2fe}
+.admin-nav .links{display:flex; gap:8px; flex-wrap:wrap}
+.admin-nav a{color:#475569; text-decoration:none; padding:6px 10px; border-radius:8px}
+.admin-nav a:hover{background:#eef2ff; color:#1f2937}
+.theme-dark .admin-nav a{color:#cfd6de}
+.theme-dark .admin-nav a:hover{background:#1f1f1f; color:#fff}
+.view-session  .admin-nav a[href$="session"],
+.view-students .admin-nav a[href$="students"],
+.view-assign   .admin-nav a[href$="assign"],
+.view-devices  .admin-nav a[href$="devices"],
+.view-live     .admin-nav a[href$="live"]{
+  background:#e0e7ff; color:#1f2937; box-shadow:0 0 0 1px #c7d2fe inset;
+}
+.theme-dark .view-session  .admin-nav a[href$="session"],
+.theme-dark .view-students .admin-nav a[href$="students"],
+.theme-dark .view-assign   .admin-nav a[href$="assign"],
+.theme-dark .view-devices  .admin-nav a[href$="devices"],
+.theme-dark .view-live     .admin-nav a[href$="live"]{
+  background:#202020; color:#fff; box-shadow:0 0 0 1px #2a2a2a inset;
+}
+
+/* Page content spacing */
+main, .content{padding:18px}
+body>header{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:18px auto;max-width:1200px;padding:0 18px}
+h2,h3,h4{margin:0}
+
+/* UI controls */
+.chip{border:1px solid var(--line);border-radius:999px;padding:4px 10px;font-size:.9rem;color:var(--muted);background:#f9fafb}
+.btn{padding:8px 12px;border:1px solid var(--line);border-radius:10px;background:#f1f5f9;color:#111827;cursor:pointer;transition:transform .05s ease}
+.btn:hover{transform:translateY(-1px)}
+.btn.primary{background:var(--accent); color:#fff; border-color:transparent}
+.btn.danger{background:var(--danger); color:#fff; border-color:transparent}
+.btn.ok{background:var(--ok); color:#fff; border-color:transparent}
+.theme-dark .btn{background:#1f1f1f; color:#f5f5f5; border-color:#2a2a2a}
+.theme-dark .btn.primary{box-shadow:0 0 0 1px rgba(59,130,246,.3), 0 6px 16px rgba(59,130,246,.2)}
+.theme-dark .btn.danger{box-shadow:0 0 0 1px rgba(239,68,68,.25)}
+.theme-dark .btn.ok{box-shadow:0 0 0 1px rgba(34,197,94,.25)}
+input,select{padding:8px;border:1px solid var(--line);background:#ffffff;color:#111827;border-radius:10px;outline:none}
+input:focus,select:focus{border-color:#93c5fd; box-shadow:0 0 0 2px #93c5fd66}
+.theme-dark input,.theme-dark select{background:#121212;color:#f5f5f5;border-color:#2a2a2a}
+.theme-dark input:focus,.theme-dark select:focus{border-color:#3b82f6; box-shadow:0 0 0 2px rgba(59,130,246,.35)}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0}
+
+/* Panels & tables */
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:20px;margin:14px auto;max-width:1200px;box-shadow:0 8px 24px rgba(0,0,0,.06)}
+.panel h3{font-size:1.05rem;margin-bottom:12px;color:var(--text)}
+.panel h4{font-size:1rem;margin-bottom:8px;color:var(--muted)}
+table{width:100%;border-collapse:separate;border-spacing:0;margin-top:12px;table-layout:auto;overflow:auto;display:block;border-radius:12px}
+thead th{font-weight:600;color:#374151;background:#f3f4f6}
+thead th{position:sticky;top:0;z-index:5}
+th,td{padding:10px 12px;font-size:.92rem;vertical-align:top;word-break:break-word;border-bottom:1px solid var(--line)}
+tbody tr:nth-child(odd){background:#fafafa}
+tbody tr:hover{background:#f1f5f9}
+.theme-dark thead th{color:#dde3ea;background:#161616}
+.theme-dark tbody tr:nth-child(odd){background:#141414}
+.theme-dark tbody tr:hover{background:#202020}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.small{font-size:.85rem;color:var(--muted)}
+
+/* Page views (hide panels not relevant) */
+.view-session  .panel{display:none}
+.view-session  .panel:nth-of-type(1){display:block}
+
+.view-students .panel{display:none}
+.view-students .panel:nth-of-type(2){display:block}
+
+.view-assign   .panel{display:none}
+.view-assign   .panel:nth-of-type(3){display:block}
+
+.view-devices  .panel{display:none}
+.view-devices  .panel:nth-of-type(4){display:block}
+
+.view-live     .panel{display:none}
+.view-live     .panel:nth-of-type(5){display:block}
+.view-live .two{grid-template-columns:2fr 1fr}
+
+/* Responsive tweaks */
+@media (max-width:768px){
+  .two{grid-template-columns:1fr}
+  body>header{padding:0 12px}
+  .panel{margin:10px 12px}
+  table{display:block; overflow:auto}
+}
+
+/* Form layout enhancements */
+.panel .row > input,
+.panel .row > select,
+.panel .row > label{flex:1}
+.panel .row > input,
+.panel .row > select{min-width:190px}
+.panel .row > button{align-self:flex-start}
+/* --- Visual enhancements appended --- */
+/* subtle divider under panel title */
+.panel h3::after{content:"";display:block;height:1px;background:var(--line);margin-top:10px;border-radius:999px}
+
+/* card-like styling for form rows */
+.panel .row{background:#f9fafb;border:1px solid var(--line);border-radius:12px;padding:10px}
+.theme-dark .panel .row{background:#161616;border-color:#2a2a2a}
+
+/* Students table interactions */
+#studBody tr{cursor:pointer; transition:background .12s ease, transform .06s ease}
+#studBody tr:hover{transform:translateY(-1px)}
+#studBody td:nth-child(2), /* ID */
+#studBody td:nth-child(3){ /* Name */
+  font-weight:500;
+}
+
+/* Navbar shadow and active underline */
+.admin-nav{box-shadow:0 1px 0 var(--line), 0 10px 24px rgba(0,0,0,.06)}
+.theme-dark .admin-nav{box-shadow:0 1px 0 #222, 0 10px 24px rgba(0,0,0,.35)}
+.view-session  .admin-nav a[href$="session"],
+.view-students .admin-nav a[href$="students"],
+.view-assign   .admin-nav a[href$="assign"],
+.view-devices  .admin-nav a[href$="devices"],
+.view-live     .admin-nav a[href$="live"]{
+  border-bottom:2px solid var(--accent);
+}
+
+/* Monospace and alignment for IDs/UIDs across tables */
+#studBody td:nth-child(1), /* UID */
+#studBody td:nth-child(2)  /* ID */{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; text-align:right; color:var(--muted) }
+#assignBody td:nth-child(2), /* UID */
+#assignBody td:nth-child(4)  /* ID */{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; text-align:right; color:var(--muted) }
+#assignBody td:nth-child(3){ font-weight:600 }
+#liveBody  td:nth-child(1), /* Time */
+#liveBody  td:nth-child(2), /* UID */
+#liveBody  td:nth-child(3), /* ID */
+#liveBody  td:nth-child(11) /* Device */{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace }
+#liveBody  td:nth-child(2),
+#liveBody  td:nth-child(3){ text-align:right; color:var(--muted) }
+
+/* Sticky header shadow for tables */
+thead{box-shadow:0 6px 12px rgba(0,0,0,.06)}
+.theme-dark thead{box-shadow:0 6px 12px rgba(0,0,0,.35)}
+
+/* Panel fade-in for smoother page view transitions */
+.panel{animation:fadeIn .22s ease both}
+@keyframes fadeIn{from{opacity:0; transform:translateY(4px)} to{opacity:1; transform:none}}
+
+/* Theme toggle icon via CSS only */
+#themeToggle{position:relative; padding-left:30px}
+#themeToggle::before{content:"🌙"; position:absolute; left:10px; top:50%; transform:translateY(-50%)}
+.theme-dark #themeToggle::before{content:"☀️"}
+
+/* Focus-visible accessibility */
+.btn:focus-visible, .admin-nav a:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+
+/* Mobile hit area improvements */
+@media (max-width:768px){
+  .btn{min-height:40px}
+  input,select{min-height:40px}
+}
+
+/* ===== Live layout fixes (prevent awkward wrapping) ===== */
+/* Header: jangan pecah perkataan supaya label kekal satu baris */
+thead th{ white-space:nowrap; word-break:normal }
+/* Kolum kritikal di Live: masa, UID/ID, event dan device jangan berbalut */
+#liveBody td:nth-child(1), /* Time */
+#liveBody td:nth-child(2), /* UID  */
+#liveBody td:nth-child(3), /* ID   */
+#liveBody td:nth-child(7), /* Event*/
+#liveBody td:nth-child(11) /* Device */{ white-space:nowrap; word-break:normal }
+/* Tambah nowrap untuk kolum masa tandas supaya satu baris jelas */
+#liveBody td:nth-child(8), /* time in (Entry) */
+#liveBody td:nth-child(9), /* toilet out */
+#liveBody td:nth-child(10) /* toilet in */{ white-space:nowrap; word-break:normal }
+
+/* Lebarkan kolum Name supaya nama tidak berpecah banyak baris */
+#liveBody td:nth-child(4){ white-space:nowrap; word-break:normal; min-width:220px }
+/* Nama boleh berbalut agar jadual tidak melimpah */
+#liveBody td:nth-child(4){ word-break:break-word; white-space:normal }

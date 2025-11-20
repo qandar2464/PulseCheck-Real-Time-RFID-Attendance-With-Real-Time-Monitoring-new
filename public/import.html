@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <title>Import Students — UPTM Admin</title>
+  <link rel="stylesheet" href="./styles.css"/>
+</head>
+<body>
+  <script>try{document.documentElement.classList.add('auth-check');}catch(e){}</script>
+  <nav class="admin-nav">
+    <div class="brand">UPTM Admin</div>
+    <div class="links">
+      <a href="./index.html?view=students">Back to Admin (Students)</a>
+      <a href="./index.html?view=session">Session</a>
+      <a href="./index.html?view=assign">Assign</a>
+      <a href="./index.html?view=devices">Devices</a>
+      <a href="./index.html?view=live">Live</a>
+    </div>
+  </nav>
+
+  <main style="padding:18px">
+    <div class="panel" style="max-width:1100px">
+      <h3>Import Students (CSV / Excel)</h3>
+      <div class="row">
+        <input id="fileInput" type="file" accept=".csv,.xlsx,.xls"/>
+        <label class="small" style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="hasHeader"> File has header</label>
+        <button id="btnParse" class="btn">Preview</button>
+        <button id="btnImport" class="btn ok">Import to Firebase</button>
+      </div>
+      <div class="small">
+        Required columns format: <code>UID, ID, Name, Intake, Course, Type</code>. If there is a header, use those names (case-insensitive).
+      </div>
+      <table>
+        <thead><tr>
+          <th>UID</th><th>ID</th><th>Name</th><th>Intake</th><th>Course</th><th>Type</th>
+        </tr></thead>
+        <tbody id="previewBody"></tbody>
+      </table>
+      <div id="status" class="small" style="margin-top:8px"></div>
+    </div>
+  </main>
+
+  <script type="module">
+    // Firebase config & SDK
+    const firebaseConfig = {
+      apiKey: "AIzaSyDcRcK3K6PGO8Q3HhkUCjzpG5TtI_VtqUk",
+      authDomain: "exam-attendance-uptm.firebaseapp.com",
+      databaseURL: "https://exam-attendance-uptm-default-rtdb.asia-southeast1.firebasedatabase.app",
+      projectId: "exam-attendance-uptm",
+      storageBucket: "exam-attendance-uptm.appspot.com",
+      messagingSenderId: "786015083116",
+      appId: "1:786015083116:web:99668a02662a156e7b5649",
+      measurementId: "G-B2NHR59NEG"
+    };
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js";
+    import { getAuth, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-auth.js";
+    import { getDatabase, ref, set } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-database.js";
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db   = getDatabase(app);
+
+    const $ = (s)=>document.querySelector(s);
+    const previewBody = $('#previewBody');
+    const statusEl = $('#status');
+
+    function setStatus(msg, isErr=false){
+      statusEl.textContent = msg || '';
+      statusEl.style.color = isErr ? '#b00020' : 'inherit';
+    }
+
+    onAuthStateChanged(auth, (u)=>{
+      if(!u){ window.location.href = './login.html'; return; }
+      try{document.documentElement.classList.remove('auth-check');}catch(e){}
+      // Selepas auth disahkan, barulah sediakan handler
+      initImportHandlers();
+    });
+
+    function initImportHandlers(){
+      $('#btnParse').addEventListener('click', renderPreview);
+      $('#btnImport').addEventListener('click', doImport);
+    }
+
+    function parseCSV(text){
+      const lines = text.split(/\r?\n/).filter(l=>l.trim().length>0);
+      return lines.map(line=>{
+        const out=[]; let cur=''; let inQ=false;
+        for(let i=0;i<line.length;i++){
+          const c=line[i];
+          if(c==='"'){
+            if(inQ && line[i+1]==='"'){ out.push(cur); cur=''; i++; }
+            else inQ=!inQ;
+          } else if(c===',' && !inQ){ out.push(cur); cur=''; }
+          else { cur+=c; }
+        }
+        out.push(cur);
+        return out.map(s=>s.trim());
+      });
+    }
+
+    async function parseFile(){
+      const f = $('#fileInput').files?.[0]; if(!f){ setStatus('Please select a file', true); return []; }
+      const hasHeader = $('#hasHeader').checked;
+      let rows=[];
+      if(f.name.toLowerCase().endsWith('.xlsx') || f.name.toLowerCase().endsWith('.xls')){
+        const buf = await f.arrayBuffer();
+        const XLSX = await import('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm');
+        const wb = XLSX.read(buf, {type:'array'});
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        rows = XLSX.utils.sheet_to_json(ws, {header:1, raw:false});
+      } else {
+        const txt = await f.text();
+        rows = parseCSV(txt);
+      }
+      // Pemetaan kolum
+      let startIdx = 0;
+      let map = {uid:0,id:1,name:2,intake:3,course:4,type:5};
+      if(hasHeader && rows.length){
+        const h = rows[0].map(x=>String(x||'').toLowerCase());
+        function find(names){ for(const n of names){ const i=h.indexOf(n); if(i!==-1) return i; } return -1; }
+        const uidI=find(['uid','rfid']); const idI=find(['id','studentid','staffid']); const nameI=find(['name','nama']);
+        const intakeI=find(['intake']); const courseI=find(['course','program']); const typeI=find(['type','jenis']);
+        map = {uid:uidI, id:idI, name:nameI, intake:intakeI, course:courseI, type:typeI};
+        startIdx = 1;
+      }
+      const out = [];
+      for(let i=startIdx;i<rows.length;i++){
+        const r=rows[i]; if(!r || r.length===0) continue;
+        const uid=(String(r[map.uid]||'').trim()); if(!uid) continue;
+        const o={
+          studentId:String(r[map.id]||'').trim(),
+          name:String(r[map.name]||'').trim(),
+          intake:String(r[map.intake]||'').trim(),
+          course:String(r[map.course]||'').trim(),
+          type:String(r[map.type]||'student').trim()||'student'
+        };
+        out.push({uid, ...o});
+      }
+      return out;
+    }
+
+    async function renderPreview(){
+      const rows = await parseFile();
+      previewBody.innerHTML = rows.map(r=>`<tr><td>${r.uid}</td><td>${r.studentId}</td><td>${r.name}</td><td>${r.intake}</td><td>${r.course}</td><td>${r.type}</td></tr>`).join('');
+      setStatus(`Preview: ${rows.length} records found`);
+      return rows;
+    }
+
+    async function doImport(){
+      const rows = await renderPreview();
+      if(rows.length===0){ setStatus('No records to import', true); return; }
+      setStatus('Importing to Firebase...');
+      let ok=0, fail=0;
+      for(const r of rows){
+        try { await set(ref(db, 'students/'+r.uid), {studentId:r.studentId, name:r.name, intake:r.intake, course:r.course, type:r.type}); ok++; }
+        catch(e){ fail++; }
+      }
+      setStatus(`Done: ${ok} succeeded, ${fail} failed`);
+    }
+  </script>
+</body>
+</html>

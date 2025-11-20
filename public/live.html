@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Admin — Live</title>
+</head>
+<body>
+  <script>try{document.documentElement.classList.add('auth-check');}catch(e){}</script>
+  <script type="module">
+    const firebaseConfig = {
+      apiKey: "AIzaSyDcRcK3K6PGO8Q3HhkUCjzpG5TtI_VtqUk",
+      authDomain: "exam-attendance-uptm.firebaseapp.com",
+      databaseURL: "https://exam-attendance-uptm-default-rtdb.asia-southeast1.firebasedatabase.app",
+      projectId: "exam-attendance-uptm",
+      storageBucket: "exam-attendance-uptm.appspot.com",
+      messagingSenderId: "786015083116",
+      appId: "1:786015083116:web:99668a02662a156e7b5649",
+      measurementId: "G-B2NHR59NEG"
+    };
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js";
+    import { getAuth, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-auth.js";
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    onAuthStateChanged(auth, (u)=>{
+      if(!u){ window.location.href = './login.html'; return; }
+      try{document.documentElement.classList.remove('auth-check');}catch(e){}
+      window.location.href = './index.html?view=live';
+    });
+  </script>
+  <noscript>
+    <p>Continue to <a href="./index.html?view=live">Live & States</a></p>
+  </noscript>
+</body>
+</html>

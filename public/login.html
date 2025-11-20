@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <title>Login — UPTM Exam Attendance Admin</title>
+  <link rel="stylesheet" href="./styles.css"/>
+</head>
+<body>
+  <!-- Navbar ringkas untuk konsisten tema -->
+  <nav class="admin-nav">
+    <div class="brand">UPTM Admin</div>
+    <div class="links">
+      <a href="./index.html?view=session">Go to Admin</a>
+    </div>
+  </nav>
+
+  <!-- Kad Login -->
+  <main style="display:flex;align-items:center;justify-content:center;min-height:70vh;padding:18px">
+    <div class="panel" style="max-width:420px;width:100%">
+      <h3>Login</h3>
+      <div class="row">
+        <input id="loginEmail" type="email" placeholder="Email"/>
+        <input id="loginPass" type="password" placeholder="Password"/>
+      </div>
+      <div class="row">
+        <button id="btnLoginEmail" class="btn ok" style="flex:1">Sign in</button>
+        <button id="btnLoginGoogle" class="btn primary" style="flex:1">Google</button>
+      </div>
+      <div class="small" id="msg" style="margin-top:8px"></div>
+    </div>
+  </main>
+
+  <!-- Tema gelap/cerah (konsisten dengan index.html, tanpa ubah fungsi sedia ada) -->
+  <script>
+    (function(){
+      var KEY='theme';
+      try {
+        var saved = localStorage.getItem(KEY)||'light';
+        if(saved==='dark'){ document.body.classList.add('theme-dark'); }
+      } catch(e){}
+    })();
+  </script>
+
+  <!-- Firebase Auth untuk login -->
+  <script type="module">
+    // Config sama seperti halaman admin
+    const firebaseConfig = {
+      apiKey: "AIzaSyDcRcK3K6PGO8Q3HhkUCjzpG5TtI_VtqUk",
+      authDomain: "exam-attendance-uptm.firebaseapp.com",
+      databaseURL: "https://exam-attendance-uptm-default-rtdb.asia-southeast1.firebasedatabase.app",
+      projectId: "exam-attendance-uptm",
+      storageBucket: "exam-attendance-uptm.appspot.com",
+      messagingSenderId: "786015083116",
+      appId: "1:786015083116:web:99668a02662a156e7b5649",
+      measurementId: "G-B2NHR59NEG"
+    };
+
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js";
+    import { getAuth, signInWithEmailAndPassword, signInWithPopup, GoogleAuthProvider, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-auth.js";
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+
+    const $ = (s)=>document.querySelector(s);
+    const msg = $('#msg');
+
+    function showMsg(t, isErr){ if(!msg) return; msg.textContent = t||''; msg.style.color = isErr? 'var(--danger)' : 'var(--muted)'; }
+
+    onAuthStateChanged(auth, (u)=>{
+      if(u){
+        // Jika sudah login, terus ke admin
+        window.location.href = './index.html?view=session';
+      }
+    });
+
+    $('#btnLoginEmail')?.addEventListener('click', async ()=>{
+      const em = $('#loginEmail').value.trim();
+      const pw = $('#loginPass').value.trim();
+      if(!em || !pw){ showMsg('Enter email and password', true); return; }
+      try {
+        await signInWithEmailAndPassword(auth, em, pw);
+        showMsg('Login successful');
+      } catch(e){ showMsg(e.message||'Login error', true); }
+    });
+
+    $('#btnLoginGoogle')?.addEventListener('click', async ()=>{
+      try {
+        await signInWithPopup(auth, new GoogleAuthProvider());
+        showMsg('Login successful (Google)');
+      } catch(e){ showMsg(e.message||'Google login error', true); }
+    });
+  </script>
+</body>
+</html>

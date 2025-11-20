@@ -1,0 +1,14 @@
+{
+  "rules": {
+    ".read": "auth != null",
+    ".write": "auth != null",
+    "students": {
+      ".indexOn": ["studentId"]
+    },
+    "attendance": {
+      "$session": {
+        ".indexOn": ["uid","event","ts"]
+      }
+    }
+  }
+}
